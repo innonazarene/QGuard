@@ -1,0 +1,11 @@
+# build artifacts
+*.app/
+QGuard.iconset/
+icon.png
+
+# signing material — NEVER commit private keys
+signing/
+*.pem
+*.p12
+
+.DS_Store
