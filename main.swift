@@ -2,6 +2,7 @@
 // Menu-bar only app (LSUIElement). Needs Accessibility permission.
 
 import Cocoa
+import UniformTypeIdentifiers
 
 // MARK: - logging
 let logURL = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Logs/QGuard.log")
@@ -18,6 +19,9 @@ func qlog(_ msg: String) {
         }
     }
 }
+
+/// Targets with this prefix match the frontmost app's process name instead of its bundle ID.
+let nameTargetPrefix = "name:"
 
 let kKeyQ: CGKeyCode = 12
 let kKeyW: CGKeyCode = 13
@@ -65,9 +69,7 @@ final class Blocker {
 
     var targets: [String] {
         get {
-            if let saved = defaults.array(forKey: "targets") as? [String], !saved.isEmpty {
-                return saved
-            }
+            if let saved = defaults.array(forKey: "targets") as? [String] { return saved }
             return ["com.valvesoftware.dota2"]
         }
         set { defaults.set(newValue, forKey: "targets") }
@@ -84,10 +86,16 @@ final class Blocker {
     /// Bundle-ID match, with a name fallback for Steam-launched games whose
     /// bundle ID macOS sometimes reports empty or oddly.
     var matchesTarget: Bool {
-        if targets.contains(frontBundleID) { return true }
+        if !frontBundleID.isEmpty && targets.contains(frontBundleID) { return true }
         let name = frontName.lowercased()
         guard !name.isEmpty else { return false }
         for t in targets {
+            // "name:RDR2" targets match by process name (Wine/.exe games have no bundle ID).
+            if t.hasPrefix(nameTargetPrefix) {
+                let want = String(t.dropFirst(nameTargetPrefix.count)).lowercased()
+                if !want.isEmpty && name.contains(want) { return true }
+                continue
+            }
             let leaf = t.split(separator: ".").last.map(String.init)?.lowercased() ?? t.lowercased()
             if !leaf.isEmpty && name.contains(leaf) { return true }
         }
@@ -273,14 +281,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let header = NSMenuItem(title: "Protected apps", action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
+        if b.targets.isEmpty {
+            let none = NSMenuItem(title: "  None yet", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            menu.addItem(none)
+        }
         for id in b.targets {
-            let item = NSMenuItem(title: "  \(prettyName(id))", action: #selector(removeTarget(_:)), keyEquivalent: "")
+            let item = NSMenuItem(title: prettyName(id), action: #selector(removeTarget(_:)), keyEquivalent: "")
             item.target = self
             item.representedObject = id
+            item.image = icon(for: id)
             item.toolTip = "\(id) — click to remove"
-            if id == b.frontBundleID { item.state = .on }
+            if (!b.frontBundleID.isEmpty && id == b.frontBundleID) || (id.hasPrefix(nameTargetPrefix) && b.matchesTarget) { item.state = .on }
             menu.addItem(item)
         }
+
+        let browse = NSMenuItem(title: "Browse for a game…", action: #selector(browseForGame(_:)), keyEquivalent: "")
+        browse.target = self
+        menu.addItem(browse)
+
+        let running = NSMenuItem(title: "Add a running app", action: nil, keyEquivalent: "")
+        running.submenu = runningAppsMenu()
+        menu.addItem(running)
+
         let add = NSMenuItem(title: "Add frontmost app…", action: #selector(addFrontmost(_:)), keyEquivalent: "")
         add.target = self
         menu.addItem(add)
@@ -300,11 +323,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(quit)
     }
 
-    private func prettyName(_ bundleID: String) -> String {
-        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) {
+    private func prettyName(_ id: String) -> String {
+        if id.hasPrefix(nameTargetPrefix) { return "\(id.dropFirst(nameTargetPrefix.count)) (Windows game)" }
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
             return url.deletingPathExtension().lastPathComponent
         }
-        return bundleID
+        if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first, let n = app.localizedName {
+            return n
+        }
+        return id
+    }
+
+    private func icon(for id: String) -> NSImage? {
+        var img: NSImage?
+        if id.hasPrefix(nameTargetPrefix) {
+            img = NSImage(systemSymbolName: "gamecontroller.fill", accessibilityDescription: nil)
+        } else if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: id) {
+            img = NSWorkspace.shared.icon(forFile: url.path)
+        } else if let app = NSRunningApplication.runningApplications(withBundleIdentifier: id).first {
+            img = app.icon
+        }
+        img = img?.copy() as? NSImage
+        img?.size = NSSize(width: 16, height: 16)
+        return img
+    }
+
+    /// Regular (Dock) apps that are running right now, minus QGuard and ones already protected.
+    private func runningAppsMenu() -> NSMenu {
+        let sub = NSMenu()
+        let have = Set(Blocker.shared.targets)
+        let apps = NSWorkspace.shared.runningApplications
+            .filter { $0.activationPolicy == .regular && $0.bundleIdentifier != Bundle.main.bundleIdentifier }
+            .sorted { ($0.localizedName ?? "").localizedCaseInsensitiveCompare($1.localizedName ?? "") == .orderedAscending }
+        for a in apps {
+            guard let id = targetID(for: a), !have.contains(id) else { continue }
+            let item = NSMenuItem(title: a.localizedName ?? id, action: #selector(addRunning(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = id
+            let img = a.icon?.copy() as? NSImage
+            img?.size = NSSize(width: 16, height: 16)
+            item.image = img
+            sub.addItem(item)
+        }
+        if sub.items.isEmpty {
+            let none = NSMenuItem(title: "Nothing new running", action: nil, keyEquivalent: "")
+            none.isEnabled = false
+            sub.addItem(none)
+        }
+        return sub
+    }
+
+    /// Bundle ID when there is one; otherwise a name target (Wine/.exe games).
+    private func targetID(for app: NSRunningApplication) -> String? {
+        if let id = app.bundleIdentifier, !id.isEmpty { return id }
+        guard let n = app.localizedName, !n.isEmpty else { return nil }
+        return nameTargetPrefix + (n as NSString).deletingPathExtension
+    }
+
+    private func addTargets(_ ids: [String]) {
+        var t = Blocker.shared.targets
+        for id in ids where !t.contains(id) { t.append(id) }
+        Blocker.shared.targets = t
+        qlog("targets += \(ids)")
+        refreshIcon()
+        refreshMenu()
     }
 
     // MARK: actions
@@ -327,14 +409,59 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func addFrontmost(_ sender: NSMenuItem) {
         // The menu is open, so "frontmost" is QGuard itself; use the last app we saw.
-        let id = Blocker.shared.frontBundleID
+        let b = Blocker.shared
+        var id = b.frontBundleID
+        if id.isEmpty && !b.frontName.isEmpty { id = nameTargetPrefix + (b.frontName as NSString).deletingPathExtension }
         guard !id.isEmpty, id != Bundle.main.bundleIdentifier else {
             alert("Nothing to add", "Switch to the app you want protected, then come back and pick this again.")
             return
         }
-        var t = Blocker.shared.targets
-        if !t.contains(id) { t.append(id); Blocker.shared.targets = t }
-        refreshMenu()
+        addTargets([id])
+    }
+
+    @objc func addRunning(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        addTargets([id])
+    }
+
+    /// Pick one or more games: Mac apps (.app) or Windows games (.exe, e.g. run through Saddle/Wine).
+    @objc func browseForGame(_ sender: Any?) {
+        let panel = NSOpenPanel()
+        panel.title = "Choose games to protect"
+        panel.message = "Pick Mac apps (.app) or Windows games (.exe). ⌘Q/⌘W will be blocked while they're in front."
+        panel.prompt = "Protect"
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.treatsFilePackagesAsDirectories = false
+        panel.allowedContentTypes = [.application, .exe].compactMap { $0 }
+        let steamCommon = URL(fileURLWithPath: NSHomeDirectory() + "/Library/Application Support/Steam/steamapps/common")
+        panel.directoryURL = FileManager.default.fileExists(atPath: steamCommon.path) ? steamCommon : URL(fileURLWithPath: "/Applications")
+
+        NSApp.activate(ignoringOtherApps: true)   // accessory apps need this or the panel opens behind everything
+        guard panel.runModal() == .OK else { return }
+
+        var ids: [String] = []
+        var skipped: [String] = []
+        for url in panel.urls {
+            if url.pathExtension.lowercased() == "app" {
+                if let id = Bundle(url: url)?.bundleIdentifier, !id.isEmpty {
+                    ids.append(id)
+                } else {
+                    ids.append(nameTargetPrefix + url.deletingPathExtension().lastPathComponent)
+                }
+            } else if url.pathExtension.lowercased() == "exe" {
+                ids.append(nameTargetPrefix + url.deletingPathExtension().lastPathComponent)
+            } else {
+                skipped.append(url.lastPathComponent)
+            }
+        }
+        if !ids.isEmpty { addTargets(ids) }
+        if !skipped.isEmpty {
+            let a = NSAlert()
+            a.messageText = "Skipped \(skipped.count) item(s)"
+            a.informativeText = "Only .app and .exe files can be protected:\n" + skipped.joined(separator: "\n")
+            a.runModal()
+        }
     }
 
     @objc func removeTarget(_ sender: NSMenuItem) {
@@ -393,6 +520,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         a.addButton(withTitle: "Later")
         if a.runModal() == .alertFirstButtonReturn { openAX(nil) }
     }
+}
+
+extension UTType {
+    /// Windows executables (UTType has no built-in constant for .exe).
+    static let exe = UTType(filenameExtension: "exe")
 }
 
 extension AppDelegate: NSMenuDelegate {

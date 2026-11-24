@@ -19,9 +19,15 @@ Other details:
 
 - ⌘Q and ⌘W can be toggled independently from the menu.
 - `⌥⌘Q` and `⌃⌘Q` always pass through, so you keep an escape hatch.
-- Protected apps default to Dota 2 (`com.valvesoftware.dota2`). Add any app via
-  *Add frontmost app…*; matching falls back to the app's display name for Steam
-  titles that report an odd bundle ID.
+- Protected apps default to Dota 2 (`com.valvesoftware.dota2`). Three ways to add more:
+  - **Browse for a game…** picks one or more `.app` or `.exe` files (opens in Steam's
+    `steamapps/common` when it exists).
+  - **Add a running app** lists everything open right now, with icons.
+  - **Add frontmost app…** grabs the last app you were in.
+- Windows games run through Wine/Saddle/CrossOver have no bundle ID, so they're stored as
+  `name:<Game>` and matched on the process name (e.g. `name:RDR2` matches `RDR2.exe`).
+- Click a protected app in the menu to remove it.
+- Matching falls back to the app's display name for Steam titles that report an odd bundle ID.
 - Counts how many accidents it prevented, which gets funny after a week.
 - Logs to `~/Library/Logs/QGuard.log`.
 
